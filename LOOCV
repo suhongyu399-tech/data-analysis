@@ -1,0 +1,83 @@
+library(glmnet)
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+expr <- read.csv("instersection gene matrix.csv", row.names = 1)
+group <- read.csv("samples.csv", row.names = 1)
+
+common <- intersect(rownames(expr), rownames(group))
+expr  <- expr[common, , drop = FALSE]
+group <- group[common, , drop = FALSE]
+
+y <- factor(group[, 1])        
+x <- as.matrix(expr)            
+n <- nrow(x)
+
+cat("Number of samples:", n, "  Number of features:", ncol(x), "\n")
+cat("Group distribution:", paste(table(y), collapse = " / "), "\n\n")
+
+set.seed(123)
+
+pred_prob <- numeric(n)    
+true_label <- character(n) 
+fold_auc <- numeric(n)     
+
+for(i in 1:n) {
+  train_idx <- setdiff(1:n, i)
+  x_train <- x[train_idx, , drop = FALSE];  y_train <- y[train_idx]
+  x_val   <- x[i, , drop = FALSE];          y_val   <- y[i]
+  cv_fit <- cv.glmnet(x_train, y_train, family = "binomial", 
+                      nfolds = min(5, length(y_train)), alpha = 1)
+  model  <- glmnet(x_train, y_train, family = "binomial", alpha = 1,
+                   lambda = cv_fit$lambda.min)
+  pred_prob[i] <- as.vector(predict(model, x_val, type = "response"))
+  true_label[i] <- as.character(y_val)
+  
+  if(i %% 10 == 0) cat("completed", i, "/", n, "折\n")
+}
+true_label <- factor(true_label, levels = levels(y))
+cat("\nLOOCV prediction completed\n")
+
+roc_obj <- roc(true_label, pred_prob, ci = TRUE, quiet = TRUE)
+ci_auc <- ci.auc(roc_obj)
+
+cat("LOOCV AUC:", round(ci_auc[2], 4), "\n")
+cat("95% CI:", round(ci_auc[1], 4), "-", round(ci_auc[3], 4), "\n")
+
+roc_df <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+auc_text <- paste0("AUC: ", sprintf("%.3f", ci_auc[2]),
+                   " (", sprintf("%.3f", ci_auc[1]), "–", 
+                   sprintf("%.3f", ci_auc[3]), ")")
+
+p <- ggplot() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", 
+              color = "gray60", linewidth = 0.6) +
+  geom_line(data = roc_df, aes(x = FPR, y = TPR), 
+            color = "red", linewidth = 1.2) +
+  annotate("text", x = 0.55, y = 0.2, label = auc_text,
+           color = "red", size = 4.5, fontface = "bold") +
+  labs(title = "LOOCV ROC Curve",
+       subtitle = paste("n =", n, "samples, Leave-One-Out Cross-Validation"),
+       x = "1 - Specificity (False Positive Rate)",
+       y = "Sensitivity (True Positive Rate)") +
+  coord_equal() +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank()
+  )
+
+pdf("LOOCV_ROC_Curve.pdf", width = 6, height = 6)
+print(p)
+dev.off()
+
+cat("\nPDF saved: LOOCV_ROC_Curve.pdf\n")
