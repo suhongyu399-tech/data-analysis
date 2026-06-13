@@ -1,0 +1,169 @@
+library(dplyr)          
+library(CIBERSORT)      
+library(ggplot2)        
+library(pheatmap)       
+library(ggpubr)         
+library(reshape2)      
+library(tidyverse)      
+library(limma)          
+library(ggthemes)       
+library(RColorBrewer)   
+library(corrplot)
+library(rstatix)       
+library(ComplexHeatmap)
+library(circlize)
+
+expr <- read.csv("gene_Matrix.csv", row.names = 1)
+group_df <- read.csv("Samples.csv", row.names = 1)
+
+boxplot(expr, outline = FALSE, notch = F, las = 2)
+expr = normalizeBetweenArrays(expr)
+boxplot(expr, outline = FALSE, notch = F, las = 2)
+
+LM22 <- read.table("LM22.txt", header = TRUE, row.names = 1, sep = "\t") %>% as.matrix()
+result_all <- cibersort(sig_matrix = LM22, mixture_file = expr, perm = 100, QN = TRUE) %>% as.data.frame()
+write.csv(result_all, "cibersort result.csv")
+
+result_immune <- result_all[, 1:22]
+col_sd <- apply(result_immune, 2, sd, na.rm = TRUE)
+constant_cols <- names(col_sd[col_sd == 0])
+if(length(constant_cols) > 0){
+ cat("Removing constant columns: ", paste(constant_cols, collapse = ", "), "\n")
+  result_immune <- result_immune[, !(colnames(result_immune) %in% constant_cols)]
+}
+cor_matrix <- cor(result_immune, use = "complete.obs")
+pdf("Immune_Cell_Correlation_Heatmap_No_Abbreviation_Control_PE+FGR.pdf", width = 9, height = 9)
+col_fun <- colorRamp2(c(-1, 0, 1), c("#87CEEB", "#FFFFFF", "#FF4500"))
+Heatmap(cor_matrix,
+        name = "Correlation",
+        col = col_fun,
+        rect_gp = gpar(col = NA, lwd = 0),
+        border = NA,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_side = "left",   
+        row_dend_side = "right",   
+        column_names_side = "top",
+        row_names_rot = 0,
+        column_names_rot = 45,
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 10),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(sprintf("%.2f", cor_matrix[i, j]), x, y, gp = gpar(fontsize = 9))
+        }
+)
+dev.off()
+
+if (!"Group" %in% colnames(group_df)) {
+  stop("Error: Column named 'Group' not found in 'Group.csv'.")
+}
+group_vector <- group_df[["Group"]]
+names(group_vector) <- rownames(group_df)
+common_samples <- intersect(rownames(result_immune), names(group_vector))
+result_immune_aligned <- result_immune[common_samples, ]
+group_vector_aligned <- group_vector[common_samples]
+group_vector_aligned <- factor(group_vector_aligned, levels = c("Control", "PE+FGR"))
+
+data_for_plot <- data.frame(
+  sample = rownames(result_immune_aligned),
+  group = group_vector_aligned,
+  result_immune_aligned,
+  check.names = FALSE,
+  row.names = NULL
+)
+
+data_long <- data_for_plot %>%
+  pivot_longer(cols = -c(sample, group),
+               names_to = "CIBERSORT",
+               values_to = "Proportion")
+my_comparisons <- list(c("Control", "PE+FGR"))
+
+stat.test <- data_long %>%
+  group_by(CIBERSORT) %>%
+  wilcox_test(Proportion ~ group) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance("p.adj") %>%
+  add_xy_position(x = "CIBERSORT", dodge = 0.8)
+
+stat.test.all <- stat.test
+
+p_boxplot <- ggboxplot(data_long,
+                       x = "CIBERSORT",
+                       y = "Proportion",
+                       fill = "group",
+                       palette = c("#aec7e8", "#ff9896"),
+                       add = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 11),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 11),
+        axis.title.y = element_text(size = 12)
+  ) +
+  stat_pvalue_manual(
+    stat.test.all,
+    label = "p.adj.signif",
+    tip.length = 0.01,
+    size = 5
+  ) +
+  labs(x = NULL, fill = "Group")
+
+print(p_boxplot)
+ggsave("Immune_Cell_Group_Comparison_Boxplot_Full_Label_Control_PE+FGR.pdf", p_boxplot, width = 16, height = 6)
+
+k <- apply(result_immune_aligned, 2, function(x) { sum(x > 0.01) >= nrow(result_immune_aligned) * 0.3 })
+re2 <- as.data.frame(t(result_immune_aligned[, k]))
+
+sample_order <- order(group_vector_aligned, decreasing = FALSE)
+re2 <- re2[, sample_order]
+group_vector_sorted <- group_vector_aligned[sample_order]
+annotation_col <- data.frame(Group = group_vector_sorted, row.names = colnames(re2))
+
+p_heatmap <- pheatmap::pheatmap(re2,
+                                scale = "row",
+                                show_colnames = FALSE,
+                                cluster_cols = FALSE,
+                                cluster_rows = TRUE,
+                                annotation_col = annotation_col,
+                                color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+                                fontsize_row = 14,
+                                fontsize = 12
+)
+
+save_pheatmap_pdf <- function(x, filename, width = 14, height = 10) {
+  pdf(filename, width = width, height = height)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+save_pheatmap_pdf(p_heatmap, "Immune_Cell_Abundance_Heatmap_Control_PE+FGR.pdf")
+
+dat2 <- data_long[data_long$CIBERSORT == "T.cells.CD8", ]
+p_single <- ggplot(dat2, aes(x = group, y = Proportion, fill = group)) +
+  geom_boxplot(width = 0.6, outlier.size = 0.8) +
+  scale_fill_manual(values = c("Control"="#7fc97f", "PE+FGR"="#beaed4")) +
+  labs(y = "T.cells.CD8 Proportion", x = NULL) +
+  theme_bw(base_size = 14) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", size = 5.5)
+print(p_single)
+
+data_for_stack <- result_immune_aligned
+data_for_stack$Samples <- rownames(data_for_stack)
+data_stack_long <- melt(data_for_stack, id.vars = "Samples")
+colnames(data_stack_long) <- c('Samples', 'celltype', 'proportion')
+data_stack_long$Group <- group_vector_aligned[data_stack_long$Samples]
+
+colour <- colorRampPalette(brewer.pal(12, "Paired"))(length(unique(data_stack_long$celltype)))
+p_stack <- ggplot(data_stack_long, aes(Samples, proportion, fill = celltype)) +
+  geom_bar(stat = "identity", position = "fill", width = 0.9) +
+  scale_fill_manual(values = colour) +
+  facet_grid(~Group, scales = "free_x", space = "free_x") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 7),
+        axis.text.y = element_text(size = 11),
+        strip.text = element_text(face = "bold", size = 12)) +
+  guides(fill = guide_legend(ncol = 1, title = "Cell Type")) +
+  labs(x = "Sample", y = "Proportion")
+
+print(p_stack)
+ggsave("Immune_Cell_Stacked_Proportion_Plot_Control_PE+FGR.pdf", p_stack, width = 16, height = 6)
