@@ -1,0 +1,44 @@
+library(rms)      
+library(Hmisc)   
+library(pROC)
+
+rt <- read.csv("nomogram.csv", row.names = 1)
+ddist <- datadist(rt)
+options(datadist = "ddist")
+lrmModel <- lrm(type ~ QPCT + HEXB + HTRA4 + CLDN9,
+                data = rt, 
+                x = TRUE, 
+                y = TRUE,
+                penalty = 1,
+                maxit = 100)  
+nomo <- nomogram(lrmModel,
+                 fun = plogis,
+                 fun.at = c(0.0001, 0.1, 0.9),
+                 funlabel = "Risk Probability",
+                 lp = FALSE)
+
+pdf("nomogram.pdf", width = 8, height = 6) 
+plot(nomo, cex.axis = 0.7)
+
+pred_external <- predict(lrmModel, 
+                         newdata = rt, 
+                         type = "fitted")
+
+roc_external <- roc(rt$type, pred_external)
+
+plot(roc_external, 
+     main = paste("External Validation AUC =", round(auc(roc_external), 3)),
+     col = "red", lwd = 2)
+
+print(roc_external)
+ci <- ci.auc(roc_external)
+print(paste("95% CI:", round(ci[1], 3), "-", round(ci[3], 3)))
+dev.off()
+
+nomoRisk <- predict(lrmModel, type = "fitted")
+outTab <- cbind(rt, Nomogram = nomoRisk)
+outTab <- rbind(id = colnames(outTab), outTab)
+write.table(outTab, file = "Model_Score.txt", sep = "\t", quote = FALSE, col.names = FALSE)
+
+cat("Nomogram and external validation ROC saved as: nomogram.pdf\n")
+cat("Model scores saved as: Model_Score.txt\n")
