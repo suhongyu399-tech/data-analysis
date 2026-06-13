@@ -1,0 +1,155 @@
+library(limma)
+library(tidyverse)
+library(ggpubr)
+library(ggExtra)
+library(viridis)
+library(forcats)
+
+immune <- read.csv("CIBERSORT_Results.csv", row.names = 1)
+risk <- read.csv("Group_File.csv", row.names = 1)
+
+immune_matrix <- as.matrix(immune[, 1:22])
+genes <- c("HEXB", "QPCT")
+
+for (gene in genes) {
+  if (!gene %in% colnames(risk)) {
+    stop(paste("Error: Column named", gene, "not found in 'Group_File.csv'."))
+  }
+}
+
+plot_correlation <- function(df, gene_name, immune_cell_name) {
+  x_orig <- df[[gene_name]]
+  y_orig <- df[[immune_cell_name]]
+  
+  x_capped <- ifelse(x_orig > quantile(x_orig, 0.99, na.rm = TRUE), quantile(x_orig, 0.99, na.rm = TRUE), x_orig)
+  y_capped <- ifelse(y_orig > quantile(y_orig, 0.99, na.rm = TRUE), quantile(y_orig, 0.99, na.rm = TRUE), y_orig)
+  
+  cor_test <- cor.test(x_capped, y_capped, method = "spearman", exact = FALSE)
+  
+  color_scatter <- "#1f77b4"
+  color_regression <- "#d62728"
+  color_ci_fill <- "#ffbb78"
+  color_density_x <- "#ff9896"
+  color_density_y <- "#aec7e8"
+  
+  p_scatter <- ggplot(data.frame(x = x_capped, y = y_capped), aes(x = x, y = y)) +
+    geom_point(color = color_scatter, alpha = 0.7, size = 2) +
+    geom_smooth(method = "lm", formula = y ~ x, color = color_regression, se = TRUE, fill = color_ci_fill, alpha = 0.3) +
+    labs(title = paste(gene_name, "vs", immune_cell_name),
+         x = paste(gene_name, "Expression / Risk Score"),
+         y = paste(immune_cell_name, "Proportion")) +
+    theme_bw(base_size = 12) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+          axis.title = element_text(size = 12, face = "bold"),
+          axis.text = element_text(size = 10),
+          panel.grid = element_blank()) +
+    stat_cor(method = "spearman", label.x.npc = "left", label.y.npc = "top",
+             aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`; `~")),
+             color = "#2c3e50", size = 4)
+  
+  p_final <- ggMarginal(p_scatter, type = "density",
+                        xparams = list(fill = color_density_x, alpha = 0.7),
+                        yparams = list(fill = color_density_y, alpha = 0.7), size = 4)
+  
+  return(list(plot = p_final, p_value = cor_test$p.value, rho = cor_test$estimate))
+}
+
+for (gene in genes) {
+  cat(paste("\n========== Analyzing", gene, "==========\n"))
+  gene_vector <- risk[, gene, drop = FALSE]
+  sameSample <- intersect(row.names(immune_matrix), row.names(gene_vector))
+  if (length(sameSample) == 0) {
+    stop(paste("Error: No common samples for", gene))
+  }
+  data_combined <- data.frame(
+    Sample = sameSample,
+    Gene = gene_vector[sameSample, , drop = TRUE],
+    immune_matrix[sameSample, , drop = FALSE],
+    check.names = FALSE
+  )
+  colnames(data_combined)[2] <- gene
+  cat(sprintf("Analysis will be based on %d common samples.\n", nrow(data_combined)))
+  
+  significant_plots <- list()
+  immune_cells_to_plot <- colnames(data_combined)[3:ncol(data_combined)]
+  
+  for(cell in immune_cells_to_plot) {
+    if(sd(data_combined[[cell]], na.rm = TRUE) < 0.01) {
+      cat(sprintf("Skipping %s: too little variation.\n", cell))
+      next
+    }
+    plot_result <- plot_correlation(data_combined, gene, cell)
+    if(plot_result$p_value < 0.05) {
+      cat(sprintf("Significant correlation: %s (rho=%.3f, p=%.4f)\n", cell, plot_result$rho, plot_result$p_value))
+      significant_plots[[cell]] <- plot_result$plot
+    }
+  }
+  
+  if(length(significant_plots) > 0) {
+    plot_dir <- paste0(gene, "_Correlation_Plots")
+    dir.create(plot_dir, showWarnings = FALSE)
+    for(i in seq_along(significant_plots)) {
+      cell_name <- names(significant_plots)[i]
+      safe_name <- gsub("[^[:alnum:]]", "_", cell_name)
+      ggsave(filename = sprintf("%s/%s_vs_%s.pdf", plot_dir, gene, safe_name),
+             plot = significant_plots[[i]], width = 7, height = 7, dpi = 300)
+    }
+    cat(sprintf("%d significant correlation plots saved for %s.\n", length(significant_plots), gene))
+  }
+  
+  cor_summary <- data.frame(Immune_Cell = character(), Rho = numeric(), P_Value = numeric())
+  
+  for(cell in immune_cells_to_plot) {
+    if(sd(data_combined[[cell]], na.rm = TRUE) < 0.01) next
+    x_orig <- data_combined[[gene]]
+    y_orig <- data_combined[[cell]]
+    x_capped <- ifelse(x_orig > quantile(x_orig, 0.99, na.rm=T), quantile(x_orig,0.99,na.rm=T), x_orig)
+    y_capped <- ifelse(y_orig > quantile(y_orig, 0.99, na.rm=T), quantile(y_orig,0.99,na.rm=T), y_orig)
+    cor_test <- cor.test(x_capped, y_capped, method="spearman", exact=F)
+    cor_summary <- rbind(cor_summary, data.frame(Immune_Cell=cell, Rho=cor_test$estimate, P_Value=cor_test$p.value))
+  }
+  
+  cor_summary_for_plot <- cor_summary %>%
+    filter(!is.na(Rho), !is.na(P_Value)) %>%
+    arrange(desc(Rho)) %>%
+    mutate(neg_log10_p = -log10(P_Value + 1e-10)) %>%
+    filter(is.finite(neg_log10_p))
+  
+  cell_order <- cor_summary_for_plot$Immune_Cell
+  cor_summary_for_plot <- cor_summary_for_plot %>%
+    mutate(Immune_Cell = factor(Immune_Cell, levels=cell_order))
+  
+  p_lollipop <- ggplot(cor_summary_for_plot, aes(x = Rho, y = forcats::fct_rev(Immune_Cell))) +
+    geom_vline(xintercept = 0, color = "black", linewidth = 0.8) +
+    geom_segment(aes(xend = 0, yend = Immune_Cell), color = "black", linewidth = 0.8, alpha=0.8) +
+    geom_point(aes(color = neg_log10_p, size = abs(Rho)), alpha=0.9) +
+    
+    scale_color_viridis(option = "plasma", name = "Significance\n(-log10P)",
+                        guide = guide_colorbar(title.position="top", barwidth=0.6, barheight=3)) +
+    scale_size_continuous(name = "Correlation strength\n(|r|)", range=c(2,8),
+                          guide=guide_legend(title.position="top", override.aes=list(color="grey50"))) +
+    
+    scale_y_discrete(expand = c(0.03, 0.03)) +
+    coord_fixed(ratio = 0.12) +
+    
+    labs(title = paste("Correlation Analysis:", gene, "vs. Immune Cell Infiltration"),
+         x = expression(paste("Spearman's Correlation Coefficient (",italic("r"),")")), y=NULL) +
+    
+    theme_bw() +
+    theme(
+      panel.background = element_rect(fill = "white", color=NA),
+      panel.grid = element_blank(),
+      panel.border = element_blank(),
+      plot.background = element_rect(fill="white", color=NA),
+      plot.title = element_text(hjust=0.5, face="bold", size=16),
+      axis.text.y = element_text(size=11, color="black"),
+      axis.text.x = element_text(size=11),
+      legend.position = "right"
+    )
+  
+  print(p_lollipop)
+  ggsave(paste0(gene, "Immune_Correlation_Lollipop.pdf"), p_lollipop, width=12, height=6, dpi=600)
+  cat(sprintf("Lollipop plot saved for %s.\n", gene))
+}
+
+cat("\nAll analyses completed!\n")
