@@ -1,0 +1,229 @@
+library(tidyverse)    
+library(broom)
+library(glmnet)
+library(ggplot2)
+library(ggrepel)
+library(gridExtra)
+x <- read.csv("intersection gene matrix.csv", row.names = 1)
+y <- read.csv("samples.csv", row.names = 1)
+x <- as.matrix(x)
+y <- as.matrix(y)
+
+set.seed(66666)
+
+type.measure <- "deviance" 
+nfolds <- 10               
+alpha <- 1                 
+cvfit <- cv.glmnet(x, y, family = "binomial", 
+                   type.measure = "deviance", 
+                   nfolds = 10, alpha = 1)
+
+
+cv_data <- data.frame(
+  lambda = cvfit$lambda,
+  cvm = cvfit$cvm,      
+  cvsd = cvfit$cvsd,    
+  log_lambda = log(cvfit$lambda)
+)
+
+cv_data$cvm_upper <- cv_data$cvm + cv_data$cvsd
+cv_data$cvm_lower <- cv_data$cvm - cv_data$cvsd
+
+lambda_min_idx <- which.min(cv_data$cvm)
+lambda_min_point <- cv_data[lambda_min_idx, ]
+lambda_1se_idx <- which(cvfit$lambda == cvfit$lambda.1se)[1]
+lambda_1se_point <- cv_data[lambda_1se_idx, ]
+
+p1 <- ggplot(cv_data, aes(x = log_lambda, y = cvm)) +
+  geom_ribbon(aes(ymin = cvm_lower, ymax = cvm_upper),
+              fill = "grey80", alpha = 0.5) +
+  geom_line(color = "red", linewidth = 1.2) +
+  geom_point(data = lambda_min_point,
+             aes(x = log_lambda, y = cvm),
+             color = "red", size = 4, shape = 19) +
+  geom_vline(xintercept = lambda_min_point$log_lambda,
+             linetype = "dashed", color = "red", alpha = 0.7) +
+  geom_point(data = lambda_1se_point,
+             aes(x = log_lambda, y = cvm),
+             color = "blue", size = 4, shape = 17) +
+  geom_vline(xintercept = lambda_1se_point$log_lambda,
+             linetype = "dashed", color = "blue", alpha = 0.7) +
+  labs(title = "LASSO",
+       x = expression(log(lambda)),
+       y = "Binomial Deviance",
+       caption = paste("n =", nrow(x), "features,", 
+                       ncol(x), "samples,", nfolds, "-fold CV")) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"  
+  )
+
+pdf("LASSO_CV_Curve.pdf", width = 12, height = 8)
+print(p1)
+dev.off()
+
+cat("LASSO: LASSO_CV_Curve.pdf\n")
+
+lasso <- glmnet(x, y, family = "binomial", alpha = 1, nlambda = 100)
+coef_matrix <- as.matrix(coef(lasso))
+coef_df <- as.data.frame(t(coef_matrix)) %>%
+  mutate(lambda = lasso$lambda,
+         log_lambda = log(lambda)) %>%
+  pivot_longer(cols = -c(lambda, log_lambda),
+               names_to = "variable",
+               values_to = "coefficient") %>%
+  filter(variable != "(Intercept)" & coefficient != 0)  
+
+final_coef <- coef(lasso, s = cvfit$lambda.min)
+final_genes <- rownames(final_coef)[which(final_coef != 0)]
+final_genes <- final_genes[final_genes != "(Intercept)"]
+
+coef_df$selected <- coef_df$variable %in% final_genes
+
+p2 <- ggplot(coef_df, aes(x = log_lambda, y = coefficient, 
+                          group = variable, color = selected)) +
+  geom_line(linewidth = 0.8, alpha = 0.8) +
+
+  geom_vline(xintercept = log(cvfit$lambda.min), 
+             linetype = "dashed", color = "red", alpha = 0.7) +
+  geom_vline(xintercept = log(cvfit$lambda.1se), 
+             linetype = "dashed", color = "blue", alpha = 0.7) +
+ 
+ labs(title = "LASSO path plot",
+     subtitle = paste(length(final_genes), "genes were selected at λ.min"),
+     x = expression(log(lambda)),
+     y = "Coefficient Value",
+     color = "Selected at λ.min") +
+  scale_color_manual(values = c("FALSE" = "grey70", "TRUE" = "red"),
+                     labels = c("FALSE" = "Not selected", "TRUE" = "Selected"))
+
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+    axis.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+
+pdf("LASSO_Coefficient_Path.pdf", width = 12, height = 8)
+print(p2)
+dev.off()
+cat("Coefficient path plot saved as: LASSO_Coefficient_Path.pdf\n")
+
+coef_min <- coef(lasso, s = cvfit$lambda.min)
+coef_1se <- coef(lasso, s = cvfit$lambda.1se)
+
+coef_data_min <- data.frame(
+  Gene = rownames(coef_min)[which(coef_min != 0)],
+  Coefficient = as.numeric(coef_min[which(coef_min != 0)])
+) %>%
+  filter(Gene != "(Intercept)") %>%
+  arrange(abs(Coefficient)) %>%
+  mutate(Gene = factor(Gene, levels = Gene))
+
+coef_data_1se <- data.frame(
+  Gene = rownames(coef_1se)[which(coef_1se != 0)],
+  Coefficient = as.numeric(coef_1se[which(coef_1se != 0)])
+) %>%
+  filter(Gene != "(Intercept)")
+
+cat("Number of genes selected by λ.min:", nrow(coef_data_min), "\n")
+cat("Number of genes selected by λ.1se:", nrow(coef_data_1se), "\n")
+
+p3_min <- ggplot(coef_data_min, aes(x = Gene, y = Coefficient, fill = Coefficient > 0)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(label = sprintf("%.3f", Coefficient),
+                hjust = ifelse(Coefficient > 0, -0.2, 1.2)),
+            size = 3.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "#377EB8"),
+                    labels = c("TRUE" = "Positive", "FALSE" = "Negative")) +
+ labs(title = paste("Coefficients of genes selected by LASSO (λ.min =", round(cvfit$lambda.min, 4), ")"),
+     subtitle = paste(nrow(coef_data_min), "genes selected"),
+       x = "Gene",
+       y = "Coefficient Value",
+       fill = "Coefficient Sign") +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+    axis.title = element_text(face = "bold"),
+    legend.position = "top",
+    panel.grid.major.y = element_blank()
+  )
+
+plot_lasso_coef <- function(coef_data, lambda_val, lambda_label) {
+  coef_data$Coefficient <- as.numeric(coef_data$Coefficient)
+  
+  ggplot(coef_data, aes(x = reorder(Gene, Coefficient), y = Coefficient)) +
+    geom_bar(
+      stat = "identity", 
+      width = 0.7,
+      aes(fill = ifelse(Coefficient > 0, "Positive", "Negative"))
+    ) +
+    geom_text(
+      aes(
+        label = sprintf("%.3f", Coefficient),
+        hjust = ifelse(Coefficient > 0, -0.15, 1.15)
+      ),
+      size = 3.5,
+      fontface = "bold"
+    ) +
+    coord_flip() +
+    scale_fill_manual(
+      values = c("Positive" = "#E41A1C", "Negative" = "#377EB8"),
+      name = "Coefficient Sign"
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0.3, 0.3))) +
+    labs(
+     title = paste("Coefficients of genes selected by LASSO (", lambda_label, "=", round(lambda_val, 4), ")"),
+    subtitle = paste(nrow(coef_data), "genes selected"),
+      x = "Gene",
+      y = "Coefficient Value"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+      axis.title = element_text(face = "bold"),
+      legend.position = "top",
+      panel.grid.major.y = element_blank()
+    )
+}
+
+p3_min <- plot_lasso_coef(coef_data_min, cvfit$lambda.min, "λ.min")
+if (nrow(coef_data_1se) > 0 && !setequal(coef_data_min$Gene, coef_data_1se$Gene)) {
+  
+  p3_1se <- plot_lasso_coef(coef_data_1se, cvfit$lambda.1se, "λ.1se")
+  pdf("LASSO_Selected_Genes.pdf", width = 16, height = 10) 
+  grid.arrange(p3_min, p3_1se, ncol = 2)
+  dev.off()
+ cat("Gene coefficient bar plot saved as: LASSO_Selected_Genes.pdf (including λ.min and λ.1se)\n")
+  
+} else {
+  pdf("LASSO_Selected_Genes.pdf", width = 10, height = 8)
+  print(p3_min)
+  dev.off()
+  cat("Gene coefficient bar plot saved as: LASSO_Selected_Genes.pdf (λ.min only)\n")
+}
+cat("Gene coefficient bar plot saved as: LASSO_Selected_Genes.pdf (λ.min only)\n")
+
+  
+lambda_seq <- exp(seq(log(min(lasso$lambda)), log(max(lasso$lambda)), length.out = 50))
+n_features <- sapply(lambda_seq, function(lam) {
+  sum(coef(lasso, s = lam) != 0) - 1  
+})
+
+performance_df <- data.frame(
+  lambda = cvfit$lambda,
+  log_lambda = log(cvfit$lambda),
+  n_features = sapply(cvfit$lambda, function(lam) {
+    sum(coef(cvfit, s = lam) != 0) - 1
+  }),
+  deviance = cvfit$cvm
+)
