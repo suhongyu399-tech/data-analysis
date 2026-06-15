@@ -1,0 +1,65 @@
+library(dplyr)
+library(data.table)
+library(tinyarray)
+library(sva)
+
+data1<-read.csv("gene matrix 1.csv",row.names = 1)
+data2<-read.csv("gene matrix 2.csv",row.names = 1)
+
+#data1 <- log2(data1 + 1)
+
+group1=data.frame(row.names = colnames(data1),
+                  sample=colnames(data1),
+                  DataSet="data1")
+group2=data.frame(row.names = colnames(data2),
+                  sample=colnames(data2),
+                  DataSet="data2")
+
+com_group=rbind(group1,group2)
+
+data1$gene <- rownames(data1) 
+data2$gene <- rownames(data2) 
+
+combine_data <- inner_join(data1,data2,)
+
+norm_data <- combine_data %>% select(-gene) 
+rownames(norm_data) <- combine_data$gene 
+
+boxplot(norm_data, las = 2,
+        cex.axis = 0.6,
+        col = "yellow4")
+
+tree<- dist(as.data.frame(t(norm_data[100:300, ])))
+clustering <- hclust(tree, method = "average")
+plot(clustering)
+
+library(FactoMineR)
+library(factoextra)
+
+pre.pca <- PCA(t(norm_data),
+               graph = FALSE)
+fviz_pca_ind(pre.pca,
+             geom= "point",
+             col.ind = com_group$DataSet,
+             addEllipses = TRUE,
+             legend.title="Group"
+)
+
+combat_data <- ComBat(norm_data, batch = com_group$DataSet) 
+
+boxplot(combat_data, las = 2, cex.axis = 0.6,col = "yellow4")
+
+tree<- dist(as.data.frame(t(combat_data[100:300, ])))
+clustering <- hclust(tree, method = "average")
+plot(clustering)
+
+pre.pca <- PCA(t(combat_data),graph = FALSE)
+fviz_pca_ind(pre.pca,
+             geom= "point",
+             col.ind = com_group$DataSet,
+             addEllipses = TRUE,
+             legend.title="Group"
+)
+
+combat_data_with_genes <- data.frame(gene = rownames(combat_data), combat_data)
+write.csv(combat_data,"After Batch .csv")
